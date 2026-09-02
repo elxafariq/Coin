@@ -9,6 +9,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 <style>
 /* ==========================================================================
    A-DERIC — monochrome dark theme. Only black / gray / white are used.
@@ -505,7 +506,7 @@ footer{border-top:1px solid var(--line);padding:50px 24px 30px;color:var(--gray-
 </section>
 
 <div class="disclaimer">
-  <b>Important:</b> A-DERIC is a private, non-monetary virtual coin. It carries no cash value, cannot be purchased with or exchanged for real-world currency, and is not a financial product, security, or cryptocurrency investment of any kind. It exists purely as an in-ecosystem unit of worth — for payments, sharing, and rewards across websites and games built by its creator — much like a fictional in-universe currency.
+  <b>Important:</b> A-DERIC is a private, non-monetary virtual coin. It carries no cash value, cannot be purchased with or exchanged for real-world currency, and is not a financial product, security, or cryptocurrency investment of any kind. It exists purely as an in-ecosystem unit of worth — for payments, sharing, and rewards across websites and games built by its creator — much like a fictional in-universe currency. Wallets are anonymous: only a username and password are required, no email or personal information is collected. One wallet is permitted per device.
 </div>
 
 <!-- ================= FOOTER ================= -->
@@ -533,16 +534,19 @@ footer{border-top:1px solid var(--line);padding:50px 24px 30px;color:var(--gray-
     </div>
 
     <div id="signinForm">
-      <div class="field"><label>Email</label><input type="email" id="siEmail" placeholder="you@example.com"></div>
-      <div class="field"><label>Password</label><input type="password" id="siPassword" placeholder="••••••••"></div>
+      <div class="field"><label>Username</label><input type="text" id="siUsername" placeholder="e.g. john_wick" autocomplete="username"></div>
+      <div class="field"><label>Password</label><input type="password" id="siPassword" placeholder="••••••••" autocomplete="current-password"></div>
       <button class="btn primary block" id="signinBtn">Sign In</button>
     </div>
 
     <div id="signupForm" class="hidden">
-      <div class="field"><label>Username</label><input type="text" id="suUsername" placeholder="e.g. john_wick"></div>
-      <div class="field"><label>Email</label><input type="email" id="suEmail" placeholder="you@example.com"></div>
-      <div class="field"><label>Password</label><input type="password" id="suPassword" placeholder="At least 6 characters"></div>
+      <div class="field"><label>Username</label><input type="text" id="suUsername" placeholder="e.g. john_wick" autocomplete="username"></div>
+      <div class="field"><label>Password</label><input type="password" id="suPassword" placeholder="At least 6 characters" autocomplete="new-password"></div>
+      <div id="captchaSlot" class="hidden" style="margin-bottom:16px;"></div>
       <button class="btn primary block" id="signupBtn">Create Wallet</button>
+      <p style="font-size:11.5px;color:var(--gray-5);margin:12px 0 0;line-height:1.6;">
+        No email needed — fully anonymous. Only one wallet is allowed per device.
+      </p>
     </div>
   </div>
 </div>
@@ -556,6 +560,35 @@ document.getElementById('year').textContent = new Date().getFullYear();
 const SUPABASE_URL = "https://xrbhxwnseqoedgppuqav.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_8hzdlfLaSxCcaJ2gfhyh1Q_x0QPsD37";
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+/* Anonymous accounts: usernames are turned into a synthetic, non-real
+   email under this fake domain so Supabase's email/password auth can be
+   used without ever asking for (or storing) a real email address.
+   Remember to turn OFF "Confirm email" in Supabase → Authentication →
+   Providers → Email, since this fake domain can never receive mail. */
+const FAKE_EMAIL_DOMAIN = "a-deric.local";
+function usernameToEmail(u){
+  return u.trim().toLowerCase().replace(/[^a-z0-9_]/g,'') + '@' + FAKE_EMAIL_DOMAIN;
+}
+
+/* Optional bot-protection: paste a Cloudflare Turnstile SITE key here and
+   enable "Captcha protection" (Turnstile) with the matching SECRET key in
+   Supabase → Authentication → Settings to require a human check on
+   sign-up. Leave empty to skip captcha entirely (default). */
+const TURNSTILE_SITE_KEY = "";
+let turnstileWidgetId = null;
+if(TURNSTILE_SITE_KEY){
+  const slot = document.getElementById('captchaSlot');
+  slot.classList.remove('hidden');
+  const renderWidget = ()=>{
+    if(window.turnstile){
+      turnstileWidgetId = window.turnstile.render(slot, { sitekey: TURNSTILE_SITE_KEY, theme:'dark' });
+    } else {
+      setTimeout(renderWidget, 300);
+    }
+  };
+  renderWidget();
+}
 
 let currentUser = null;
 let currentProfile = null;
@@ -600,35 +633,100 @@ tabSignup.addEventListener('click', ()=>{
 });
 
 /* ============================================================
+   DEVICE FINGERPRINT
+   One value derived from browser/hardware signals (canvas render,
+   screen, timezone, GPU-ish signals). Sent at sign-up so the database
+   trigger can enforce "one wallet per device". Recomputed fresh every
+   time (not just read from storage) so clearing localStorage alone
+   can't fake a new device.
+   ============================================================ */
+async function getDeviceFingerprint(){
+  const parts = [];
+  parts.push(navigator.userAgent || '');
+  parts.push(navigator.language || '');
+  parts.push(String(navigator.hardwareConcurrency || ''));
+  parts.push(String(navigator.deviceMemory || ''));
+  parts.push((screen.width||'') + 'x' + (screen.height||'') + 'x' + (screen.colorDepth||''));
+  try{ parts.push(Intl.DateTimeFormat().resolvedOptions().timeZone || ''); }catch(e){}
+  try{
+    const canvas = document.createElement('canvas');
+    canvas.width = 220; canvas.height = 40;
+    const ctx = canvas.getContext('2d');
+    ctx.textBaseline = 'top';
+    ctx.font = "14px 'Arial'";
+    ctx.fillStyle = '#fff';
+    ctx.fillText('A-DERIC-fp-🔒-' + navigator.platform, 2, 2);
+    parts.push(canvas.toDataURL());
+  }catch(e){}
+  const raw = parts.join('|||');
+  try{
+    const enc = new TextEncoder().encode(raw);
+    const hashBuf = await crypto.subtle.digest('SHA-256', enc);
+    return Array.from(new Uint8Array(hashBuf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  }catch(e){
+    // Fallback if SubtleCrypto is unavailable (very old browsers)
+    let h = 0;
+    for(let i=0;i<raw.length;i++){ h = ((h<<5)-h+raw.charCodeAt(i))|0; }
+    return 'fallback-' + h;
+  }
+}
+
+/* ============================================================
    AUTH ACTIONS
    ============================================================ */
 document.getElementById('signupBtn').addEventListener('click', async ()=>{
   const username = document.getElementById('suUsername').value.trim();
-  const email = document.getElementById('suEmail').value.trim();
   const password = document.getElementById('suPassword').value;
-  if(!username || !email || !password){ toast('Please fill in every field.', true); return; }
+  if(!username || !password){ toast('Please fill in every field.', true); return; }
+  if(!/^[a-zA-Z0-9_]{3,20}$/.test(username)){ toast('Username: 3-20 characters, letters/numbers/underscore only.', true); return; }
   if(password.length < 6){ toast('Password must be at least 6 characters.', true); return; }
+
+  let captchaToken;
+  if(TURNSTILE_SITE_KEY){
+    captchaToken = window.turnstile ? window.turnstile.getResponse(turnstileWidgetId) : null;
+    if(!captchaToken){ toast('Please complete the verification check.', true); return; }
+  }
+
   const btn = document.getElementById('signupBtn');
   btn.disabled = true; btn.textContent = 'Creating…';
-  const { data, error } = await sb.auth.signUp({
-    email, password,
-    options:{ data:{ username } }
-  });
+
+  const device_fp = await getDeviceFingerprint();
+  const email = usernameToEmail(username);
+
+  const signUpOptions = { data:{ username, device_fp } };
+  if(captchaToken) signUpOptions.captchaToken = captchaToken;
+
+  const { data, error } = await sb.auth.signUp({ email, password, options: signUpOptions });
+
   btn.disabled = false; btn.textContent = 'Create Wallet';
-  if(error){ toast(error.message, true); return; }
-  toast('Wallet created! Check your email to confirm, then sign in.');
+  if(TURNSTILE_SITE_KEY && window.turnstile) window.turnstile.reset(turnstileWidgetId);
+
+  if(error){
+    if(/DEVICE_ALREADY_REGISTERED/.test(error.message)){
+      toast('This device already has an A-DERIC wallet. Only one wallet per device is allowed.', true);
+    } else if(/already registered|already exists/i.test(error.message)){
+      toast('That username is taken. Try another one.', true);
+    } else {
+      toast(error.message, true);
+    }
+    return;
+  }
+  toast('Wallet created! You can sign in now.');
+  document.getElementById('suUsername').value = '';
+  document.getElementById('suPassword').value = '';
   tabSignin.click();
 });
 
 document.getElementById('signinBtn').addEventListener('click', async ()=>{
-  const email = document.getElementById('siEmail').value.trim();
+  const username = document.getElementById('siUsername').value.trim();
   const password = document.getElementById('siPassword').value;
-  if(!email || !password){ toast('Please enter your email and password.', true); return; }
+  if(!username || !password){ toast('Please enter your username and password.', true); return; }
   const btn = document.getElementById('signinBtn');
   btn.disabled = true; btn.textContent = 'Signing in…';
+  const email = usernameToEmail(username);
   const { data, error } = await sb.auth.signInWithPassword({ email, password });
   btn.disabled = false; btn.textContent = 'Sign In';
-  if(error){ toast(error.message, true); return; }
+  if(error){ toast('Incorrect username or password.', true); return; }
   closeAuth();
   toast('Welcome back.');
 });
